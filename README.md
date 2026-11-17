@@ -1,21 +1,25 @@
 # OK.PHOTOWORK
 
 Photography site with an admin editor, private client galleries, star ratings and notes.
-Runs on Cloudflare Pages.
+Runs as a Cloudflare Worker with static assets.
 
-- `index.html` is the site.
-- `functions/api/[[path]].js` is the backend (Cloudflare Pages Functions).
+- `public/index.html` is the site (served as static assets).
+- `src/worker.js` is the backend. It only handles `/api/*` requests.
+- `wrangler.jsonc` is the Worker config (assets, KV and R2 bindings).
 
-## One-time Cloudflare setup
-1. Workers & Pages > KV > Create a namespace (for example `ok-photowork`).
-2. R2 > Create a bucket (for example `ok-photowork-photos`). R2 needs billing details on file; the free tier is generous.
-3. Pages project > Settings > Bindings (Functions):
-   - Add KV namespace binding. Variable name: `SITE`. Pick the namespace from step 1.
-   - Add R2 bucket binding. Variable name: `PHOTOS`. Pick the bucket from step 2.
-4. Pages project > Settings > Variables and Secrets (Production), add as Secrets:
-   - `ADMIN_PASSWORD` : the password you will use to sign in to the admin page.
-   - `SESSION_SECRET` : a long random string (40+ characters).
-5. Redeploy (Deployments > Retry deployment) so the bindings take effect.
+## Deploy
+The deploy command is `npx wrangler deploy`.
+
+On the first deploy Wrangler creates the KV namespace (binding `SITE`) and the R2 bucket
+(binding `PHOTOS`) automatically. R2 needs billing details on file; the free tier is generous.
+If you already have a namespace or bucket, put its `id` / `bucket_name` in `wrangler.jsonc`.
+
+## One-time secrets
+Worker > Settings > Variables and Secrets, add as **Secrets**:
+- `ADMIN_PASSWORD` : the password you will use to sign in to the admin page.
+- `SESSION_SECRET` : a long random string (40+ characters).
+
+Or from a terminal: `npx wrangler secret put ADMIN_PASSWORD` and `npx wrangler secret put SESSION_SECRET`.
 
 ## Using it
 - Admin: open `https://YOUR-SITE/#admin` and sign in with `ADMIN_PASSWORD`.

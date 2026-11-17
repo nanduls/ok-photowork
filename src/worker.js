@@ -1,4 +1,5 @@
-// Cloudflare Pages Function: handles every /api/* request.
+// Cloudflare Worker: handles every /api/* request (see run_worker_first in wrangler.jsonc).
+// Everything else is served from ./public as static assets.
 // Bindings needed: SITE (KV namespace), PHOTOS (R2 bucket).
 // Secrets needed: ADMIN_PASSWORD, SESSION_SECRET.
 
@@ -52,7 +53,7 @@ const clients = async (env) => JSON.parse((await env.SITE.get('clients')) || '[]
 const pub = (c) => ({ cid: c.cid, name: c.name, note: c.note || '', photos: c.photos || [] });
 const body = async (req) => { try { return await req.json(); } catch { return null; } };
 
-export async function onRequest({ request, env }) {
+async function handle(request, env) {
   try {
     if (!env.SITE || !env.PHOTOS || !env.ADMIN_PASSWORD || !env.SESSION_SECRET) {
       return J({ error: 'Server is not set up yet. Add the SITE and PHOTOS bindings and the ADMIN_PASSWORD and SESSION_SECRET secrets.' }, 500);
@@ -192,3 +193,9 @@ export async function onRequest({ request, env }) {
     return J({ error: 'Server error: ' + (e && e.message ? e.message : 'unknown') }, 500);
   }
 }
+
+export default {
+  fetch(request, env) {
+    return handle(request, env);
+  },
+};
