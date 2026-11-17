@@ -214,9 +214,12 @@ contact:{title:'Let’s create something together',text:'Send us the date, the p
 footer:{tagline:'Let’s create something meaningful together.'},
 cats:[C0('Portraits','Individuals and families, on location or by window light.','Portrait',[3,5,8,12]),C0('Events','Quiet coverage of the key moments and the small ones between.','Portrait',[8,4,9,6]),C0('Landscape','First light, blue hour and the long way round.','Landscape',[4,8,2,6]),C0('Street','Cities after rain and after dark.','Street',[5,9,3,7]),C0('Product','Clean, consistent images for catalogues and shops.','Product',[6,2,4,8]),C0('Prints','Personal work, made to be framed.','Landscape',[3,7,10,11])],
 posts:[P0('Chasing first light on the ridge','Landscape','Why the quiet hour before sunrise is worth the early start.','Landscape',4),P0('Window light for portraits, explained','Tips','Placing a subject, reading the light and keeping it simple.','Portrait',3),P0('Photographing a day in natural light','Events','Working with what the room gives you.','Portrait',8),P0('A week of street photography','Street','Notes on patience, distance and rain.','Street',9),P0('A clean product shot at home','Product','Backgrounds, reflections and one good window.','Product',6),P0('Why we edit with a light hand','Process','Natural colour and a finish that does not shout.','Portrait',5),P0('Blue hour: a short field guide','Landscape','When to arrive, what to bring and when to leave.','Landscape',8),P0('Planning a portrait session','Portraits','Location, clothing and how to feel at ease.','Portrait',12)]};
-var FB={},CL={list:[]},C=clone(DEF),D=null,DB=null,AS=null,canEdit=false,dirty=false,tab='site',cur='home',confirmReset=false;
 
-function pic(it,t){return it&&it.id?'<img alt="" loading="lazy" src="/_blob/'+esc(it.id)+'">':scene(t,+(it&&it.seed)||1)}
+var C=clone(DEF),D=null,authed=false,dirty=false,tab='site',cur='home',confirmReset=false,FB={},unlocked=null,GA=null;
+function api(m,p,b){var o={method:m,credentials:'same-origin',headers:{}};if(b!==undefined){o.body=JSON.stringify(b);o.headers['Content-Type']='application/json'}
+return fetch(p,o).then(function(r){return r.json().catch(function(){return{}}).then(function(j){if(!r.ok){var e=new Error(j.error||('Error '+r.status));e.status=r.status;throw e}return j})})}
+function upFile(f,kind){return fetch('/api/admin/upload?kind='+kind,{method:'POST',credentials:'same-origin',headers:{'Content-Type':f.type||'application/octet-stream'},body:f}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){if(!r.ok)throw new Error(j.error||'Upload failed');return j})})}
+function pic(it,t){return it&&it.id?'<img alt="" loading="lazy" src="/api/img/'+esc(it.id)+'">':scene(t,+(it&&it.seed)||1)}
 function ph(it,t){return '<div class="ph" role="img" aria-label="'+esc(t)+' photograph">'+pic(it,t)+'</div>'}
 function lines(c){var o=[];if(c.email)o.push('<a href="mailto:'+esc(c.email)+'">'+esc(c.email)+'</a>');if(c.phone)o.push('<a href="tel:'+esc(c.phone.replace(/[^\d+]/g,''))+'">'+esc(c.phone)+'</a>');if(c.instagram){var h=c.instagram.trim(),u=/^https?:\/\//i.test(h)?h:'https://instagram.com/'+h.replace(/^@/,'');o.push('<a href="'+esc(u)+'" target="_blank" rel="noopener">Instagram</a>')}if(c.location)o.push('<span>'+esc(c.location)+'</span>');return o.join('')}
 function post(p){return '<article class="post">'+ph(p,p.type)+'<div class="pb"><em>'+esc(p.tag)+'</em><h3>'+esc(p.title)+'</h3><p>'+esc(p.excerpt)+'</p></div></article>'}
@@ -235,92 +238,90 @@ var P=C.posts;$('#jr').innerHTML=P.length?'<article class="feat">'+ph(P[0],P[0].
 $('#cl').innerHTML=lines(C.contact);$('#fcl').innerHTML=lines(C.contact);
 $('#fpf').innerHTML=C.cats.slice(0,5).map(function(c){return '<a href="#portfolio">'+esc(c.name)+'</a>'}).join('')}
 
+
+
 /* admin */
 function st(m){var e=$('#st');if(e)e.textContent=m}
 function mark(){dirty=true;st('Unsaved changes')}
 function fld(l,p,ta){var v=esc(get(D,p));return '<label class="f"><span>'+l+'</span>'+(ta?'<textarea rows="4" data-b="'+p+'">'+v+'</textarea>':'<input data-b="'+p+'" value="'+v+'">')+'</label>'}
-function tile(p,t,rm){return '<div class="tile2">'+ph(get(D,p),t)+'<div class="tb">'+(AS?'<label>Upload<input type="file" accept="image/*" hidden data-up="'+p+'"></label>':'')+'<button data-reset="'+p+'">Reset</button>'+(rm?'<button class="danger" data-rm="'+p+'">Remove</button>':'')+'</div></div>'}
+function tile(p,t,rm){return '<div class="tile2">'+ph(get(D,p),t)+'<div class="tb"><label>Upload<input type="file" accept="image/*" hidden data-up="'+p+'"></label><button data-reset="'+p+'">Reset</button>'+(rm?'<button class="danger" data-rm="'+p+'">Remove</button>':'')+'</div></div>'}
+function fbsum(c){var d=FB[String(c.cid).toLowerCase()],p=(d&&d.p)||{},ids=(c.photos||[]).filter(function(x){return p[x.id]});if(!ids.length)return '<p class="hint">No feedback from this client yet.</p>';return '<h3 class="fh">Client feedback</h3><div class="fbl">'+ids.map(function(x){var f=p[x.id],r=f.r||0;return '<div class="fbi"><img alt="" src="/api/photo/'+esc(x.id)+'"><div><div class="strs">'+'★'.repeat(r)+'<span class="dim">'+'★'.repeat(5-r)+'</span></div>'+(f.f==='pick'?'<b>⚑ Picked</b> ':'')+(f.f==='reject'?'<b>✕ Rejected</b> ':'')+(f.n?'<p>'+esc(f.n)+'</p>':'')+'</div></div>'}).join('')+'</div>'}
 function panel(){var h='';
 if(tab==='site')h=fld('Site name','site.name')+fld('Hero label','hero.eyebrow')+fld('Hero headline','hero.title')+fld('Hero text','hero.text',1)+fld('Footer tagline','footer.tagline');
 else if(tab==='about'){h=fld('Label','about.tag')+fld('Heading','about.title')+fld('Text','about.text',1);D.about.vals.forEach(function(v,i){h+='<div class="two">'+fld('Point '+(i+1)+' title','about.vals.'+i+'.t')+fld('Point '+(i+1)+' text','about.vals.'+i+'.d')+'</div>'});h+='<h3>Photos</h3><div class="th">'+D.about.imgs.map(function(x,i){return tile('about.imgs.'+i,x.type)}).join('')+'</div>'}
-else if(tab==='clients'){h='<p class="note">Clients open <b>#client</b> on this page and enter their ID and password. Leave the password box empty to keep the current password.</p>';D.clients.forEach(function(c,i){h+='<div class="box"><h3>Client '+(i+1)+'<button class="mini danger" data-act="delclient" data-i="'+i+'">Delete client</button></h3><div class="two">'+fld('Client name','clients.'+i+'.name')+fld('Login ID','clients.'+i+'.cid')+'</div><label class="f"><span>Password '+(c.hash?'(set)':'(not set)')+'</span><input data-b="clients.'+i+'.pw" placeholder="Type a new password" value="'+esc(c.pw||'')+'"></label>'+fld('Message to client','clients.'+i+'.note',1)+'<div class="th">'+(c.photos||[]).map(function(x,j){return '<div class="tile2"><div class="ph"><img alt="" src="/_blob/'+esc(x.id)+'"></div><div class="tb"><button class="danger" data-rm="clients.'+i+'.photos.'+j+'">Remove</button></div></div>'}).join('')+'</div>'+fbsum(c)+(AS?'<label class="mini">Add photos<input type="file" accept="image/*" multiple hidden data-upm="clients.'+i+'.photos"></label>':'')+'</div>'});h+='<button class="mini" data-act="addclient">+ Add client</button>'}
+else if(tab==='clients'){h='<p class="note">Clients open <b>#client</b> on this site and sign in with their ID and password. IDs use letters, numbers, - and _ only. Passwords need 6+ characters. Leave the password box empty to keep the current one.</p>';D.clients.forEach(function(c,i){h+='<div class="box"><h3>Client '+(i+1)+'<button class="mini danger" data-act="delclient" data-i="'+i+'">Delete client</button></h3><div class="two">'+fld('Client name','clients.'+i+'.name')+fld('Login ID','clients.'+i+'.cid')+'</div><label class="f"><span>Password '+(c.hasPw?'(set)':'(not set)')+'</span><input data-b="clients.'+i+'.pw" placeholder="Type a new password" value="'+esc(c.pw||'')+'"></label>'+fld('Message to client','clients.'+i+'.note',1)+'<div class="th">'+(c.photos||[]).map(function(x,j){return '<div class="tile2"><div class="ph"><img alt="" src="/api/photo/'+esc(x.id)+'"></div><div class="tb"><button class="danger" data-rm="clients.'+i+'.photos.'+j+'">Remove</button></div></div>'}).join('')+'</div>'+fbsum(c)+'<label class="mini">Add photos<input type="file" accept="image/*" multiple hidden data-upm="clients.'+i+'.photos"></label></div>'});h+='<button class="mini" data-act="addclient">+ Add client</button>'}
 else if(tab==='contact')h=fld('Heading','contact.title')+fld('Text','contact.text',1)+fld('Email','contact.email')+fld('Phone','contact.phone')+fld('Instagram (handle or link)','contact.instagram')+fld('Location','contact.location');
 else if(tab==='portfolio'){D.cats.forEach(function(c,i){h+='<div class="box"><h3>Category '+(i+1)+'<button class="mini danger" data-act="delcat" data-i="'+i+'">Delete category</button></h3><div class="two">'+fld('Name','cats.'+i+'.name')+'<label class="f"><span>Style when no photo</span><select data-b="cats.'+i+'.type">'+['Portrait','Landscape','Street','Product'].map(function(t){return '<option'+(c.type===t?' selected':'')+'>'+t+'</option>'}).join('')+'</select></label></div>'+fld('Description','cats.'+i+'.desc')+'<div class="th">'+c.imgs.map(function(x,j){return tile('cats.'+i+'.imgs.'+j,c.type,1)}).join('')+'</div><button class="mini" data-act="addimg" data-i="'+i+'">+ Add photo slot</button></div>'});h+='<button class="mini" data-act="addcat">+ Add category</button>'}
 else{D.posts.forEach(function(p,i){h+='<div class="box"><h3>Story '+(i+1)+'<span><button class="mini" data-act="up" data-i="'+i+'">↑</button> <button class="mini" data-act="down" data-i="'+i+'">↓</button> <button class="mini danger" data-act="delpost" data-i="'+i+'">Delete</button></span></h3><div class="two">'+fld('Title','posts.'+i+'.title')+fld('Tag','posts.'+i+'.tag')+'</div>'+fld('Summary','posts.'+i+'.excerpt',1)+'<div class="th">'+tile('posts.'+i,p.type)+'</div></div>'});h+='<button class="mini" data-act="addpost">+ Add story</button>'}
 $('#panel').innerHTML=h;
 $$('.tabs button').forEach(function(b){b.classList.toggle('on',b.dataset.tab===tab)})}
+function loadAdmin(){return Promise.all([api('GET','/api/admin/clients'),api('GET','/api/admin/feedback')]).then(function(r){D=clone(C);D.clients=r[0].list||[];FB=r[1]||{}}).catch(function(e){if(e.status===401)authed=false;else{D=clone(C);D.clients=[];FB={}}}).then(function(){buildAdmin()})}
 function buildAdmin(){var el=$('#adm');
-if(!DB||!canEdit){el.innerHTML='<div class="wrap adm"><h1 class="ptitle">Admin</h1><div class="note">'+(!DB?'Editing is available when this page is opened by its owner in claude.ai.':'Only the site owner or editors can use this page.')+'</div></div>';return}
-if(!D){D=clone(C);D.clients=clone(CL.list)}
-el.innerHTML='<div class="wrap adm"><div class="abar"><h1 class="ptitle">Admin</h1><span id="st"></span><button class="btn w" id="reset">Restore defaults</button><button class="btn y" id="save">Save changes</button></div>'+(AS?'':'<p class="note">Photo upload is available to editors only.</p>')+'<div class="tabs">'+[['site','Site info'],['portfolio','Portfolio'],['journal','Journal'],['about','About'],['contact','Contact'],['clients','Clients']].map(function(t){return '<button data-tab="'+t[0]+'">'+t[1]+'</button>'}).join('')+'</div><div id="panel"></div></div>';
+if(!authed){el.innerHTML='<div class="wrap cl"><div class="login"><h1 class="ptitle">Admin</h1><p>Enter the admin password to edit the site.</p><label class="f"><span>Password</span><input id="apw" type="password" autocomplete="current-password"></label><button class="btn y" id="ago" style="cursor:pointer;font-family:inherit">Sign in</button> <span id="amsg"></span></div></div>';return}
+if(!D){el.innerHTML='<div class="wrap adm"><p>Loading…</p></div>';loadAdmin();return}
+el.innerHTML='<div class="wrap adm"><div class="abar"><h1 class="ptitle">Admin</h1><span id="st"></span><button class="btn w" id="signout">Sign out</button><button class="btn w" id="reset">Restore defaults</button><button class="btn y" id="save">Save changes</button></div><div class="tabs">'+[['site','Site info'],['portfolio','Portfolio'],['journal','Journal'],['about','About'],['contact','Contact'],['clients','Clients']].map(function(t){return '<button data-tab="'+t[0]+'">'+t[1]+'</button>'}).join('')+'</div><div id="panel"></div></div>';
 panel()}
-function save(){st('Saving…');var cd=clone(D),list=cd.clients||[];delete cd.clients;
-Promise.all(list.map(function(c){if(!c.pw)return c;var salt=Math.random().toString(36).slice(2)+Date.now().toString(36);return sha(salt+':'+c.pw).then(function(h){c.salt=salt;c.hash=h;delete c.pw;return c})})).then(function(l){return Promise.all([DB.doc('site/content').set(cd),DB.doc('site/clients').set({list:l})]).then(function(){dirty=false;C=Object.assign(clone(DEF),cd);CL={list:l};D=null;render();buildAdmin();st('Saved')})}).catch(function(e){st('Could not save: '+((e&&e.message)||'unknown error'))})}
-function up(p,f){if(!AS)return;st('Uploading…');AS.upload(f).then(function(r){setp(D,p+'.id',r.id);mark();panel()},function(e){st('Upload failed: '+((e&&e.message)||'unknown error'))})}
+function adminLogin(){var m=$('#amsg');m.textContent='Signing in…';api('POST','/api/admin/login',{password:$('#apw').value}).then(function(){authed=true;$('#adminlink').hidden=false;D=null;buildAdmin()},function(e){m.textContent=e.message})}
+function save(){st('Saving…');var cd=clone(D),cl=cd.clients||[];delete cd.clients;
+Promise.all([api('PUT','/api/admin/content',cd),api('PUT','/api/admin/clients',{list:cl})]).then(function(){dirty=false;C=Object.assign(clone(DEF),cd);render();D=null;return loadAdmin()}).then(function(){st('Saved')},function(e){st('Could not save: '+e.message)})}
+function up(p,f){st('Uploading…');upFile(f,'public').then(function(r){setp(D,p+'.id',r.id);mark();panel()},function(e){st(e.message)})}
 var adm=$('#adm');
 adm.addEventListener('input',function(e){var t=e.target;if(t.dataset.b){setp(D,t.dataset.b,t.value);mark();if(t.tagName==='SELECT')panel()}});
-adm.addEventListener('change',function(e){var t=e.target;if(t.dataset.up&&t.files[0])up(t.dataset.up,t.files[0]);if(t.dataset.upm&&t.files.length&&AS){var arr=get(D,t.dataset.upm),fs=[].slice.call(t.files);st('Uploading…');fs.reduce(function(p,f){return p.then(function(){return AS.upload(f).then(function(r){arr.push({id:r.id})})})},Promise.resolve()).then(function(){mark();panel()},function(e2){mark();panel();st('Upload failed: '+((e2&&e2.message)||'unknown error'))})}});
+adm.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.id==='apw')adminLogin()});
+adm.addEventListener('change',function(e){var t=e.target;if(t.dataset.up&&t.files[0])up(t.dataset.up,t.files[0]);
+if(t.dataset.upm&&t.files.length){var arr=get(D,t.dataset.upm),fs=[].slice.call(t.files);st('Uploading…');fs.reduce(function(p,f){return p.then(function(){return upFile(f,'client').then(function(r){arr.push({id:r.id})})})},Promise.resolve()).then(function(){mark();panel()},function(e2){mark();panel();st(e2.message)})}});
 adm.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var d=b.dataset;
 if(d.tab){tab=d.tab;panel()}
+else if(b.id==='ago')adminLogin();
 else if(b.id==='save')save();
-else if(b.id==='reset'){if(!confirmReset){confirmReset=true;b.textContent='Click again to confirm';setTimeout(function(){confirmReset=false;if(b.isConnected)b.textContent='Restore defaults'},4000)}else{confirmReset=false;D=clone(DEF);D.clients=clone(CL.list);buildAdmin();mark();st('Defaults loaded. Save to apply.')}}
+else if(b.id==='signout'){api('POST','/api/admin/logout').catch(function(){}).then(function(){authed=false;D=null;$('#adminlink').hidden=true;buildAdmin()})}
+else if(b.id==='reset'){if(!confirmReset){confirmReset=true;b.textContent='Click again to confirm';setTimeout(function(){confirmReset=false;if(b.isConnected)b.textContent='Restore defaults'},4000)}else{confirmReset=false;var cl=D.clients;D=clone(DEF);D.clients=cl;buildAdmin();mark();st('Defaults loaded. Save to apply.')}}
 else if(d.reset){setp(D,d.reset+'.id','');mark();panel()}
 else if(d.rm){var ks=d.rm.split('.'),i=+ks.pop();get(D,ks.join('.')).splice(i,1);mark();panel()}
-else if(d.act){var i=+d.i,a=d.act;
+else if(d.act){var i2=+d.i,a=d.act;
 if(a==='addclient')D.clients.push({name:'New client',cid:'',note:'',photos:[]});
-if(a==='delclient')D.clients.splice(i,1);
+if(a==='delclient')D.clients.splice(i2,1);
 if(a==='addcat')D.cats.push(C0('New category','Describe this category.','Landscape',[1,2,3,4]));
-if(a==='delcat')D.cats.splice(i,1);
-if(a==='addimg')D.cats[i].imgs.push({id:'',seed:D.cats[i].imgs.length+3});
+if(a==='delcat')D.cats.splice(i2,1);
+if(a==='addimg')D.cats[i2].imgs.push({id:'',seed:D.cats[i2].imgs.length+3});
 if(a==='addpost')D.posts.push(P0('New story','Tag','Short summary.','Landscape',D.posts.length+2));
-if(a==='delpost')D.posts.splice(i,1);
-if(a==='up'&&i>0)D.posts.splice(i-1,2,D.posts[i],D.posts[i-1]);
-if(a==='down'&&i<D.posts.length-1)D.posts.splice(i,2,D.posts[i+1],D.posts[i]);
+if(a==='delpost')D.posts.splice(i2,1);
+if(a==='up'&&i2>0)D.posts.splice(i2-1,2,D.posts[i2],D.posts[i2-1]);
+if(a==='down'&&i2<D.posts.length-1)D.posts.splice(i2,2,D.posts[i2+1],D.posts[i2]);
 mark();panel()}});
 
 /* client gallery */
-var unlocked=null,fails=0,lockUntil=0;
-function sha(s){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)).then(function(b){return [].map.call(new Uint8Array(b),function(x){return ('0'+x.toString(16)).slice(-2)}).join('')})}
 function clientView(){var el=$('#cv');
-if(unlocked){var c=CL.list.filter(function(x){return x.cid===unlocked})[0];if(c){if(gallery(c))return;var ps=c.photos||[];el.innerHTML='<div class="wrap cl"><div class="abar"><h1 class="ptitle">'+esc(c.name)+'</h1><button class="btn w" id="clout">Log out</button></div>'+(c.note?'<p class="lead2">'+esc(c.note)+'</p>':'')+'<div class="g4">'+ps.map(function(p,i){return '<button class="ph pbtn" data-big="'+esc(p.id)+'" aria-label="Open photo '+(i+1)+'"><img alt="Photo '+(i+1)+'" src="/_blob/'+esc(p.id)+'"></button>'}).join('')+'</div>'+(ps.length?'':'<p>Your photos will appear here soon.</p>')+'</div>';return}unlocked=null}
-if($('#cid')&&document.activeElement===$('#cid'))return;
-el.innerHTML='<div class="wrap cl"><div class="login"><h1 class="ptitle">Client login</h1><p>Enter the ID and password we sent you to view your photos.</p>'+(DB?'':'<div class="note">Client galleries are available to people the owner has invited to this page.</div>')+'<label class="f"><span>ID</span><input id="cid" autocomplete="username"></label><label class="f"><span>Password</span><input id="cpw" type="password" autocomplete="current-password"></label><button class="btn y" id="clgo" style="cursor:pointer;font-family:inherit">View my photos</button> <span id="clmsg"></span></div></div>'}
-function login(){var m=$('#clmsg'),id=$('#cid').value.trim().toLowerCase(),pw=$('#cpw').value;
-if(Date.now()<lockUntil){m.textContent='Too many attempts. Please wait a moment.';return}
-var c=CL.list.filter(function(x){return String(x.cid||'').trim().toLowerCase()===id})[0];
-var fail=function(){fails++;if(fails>=5){lockUntil=Date.now()+30000;fails=0}m.textContent='ID or password is not correct.'};
-if(!c||!c.hash||!pw||!window.crypto||!crypto.subtle){fail();return}
-sha(c.salt+':'+pw).then(function(h){if(h===c.hash){unlocked=c.cid;fails=0;clientView()}else fail()})}
-function openBig(id){var d=document.createElement('div');d.id='lbx';d.innerHTML='<img alt="" src="/_blob/'+esc(id)+'">';function k(e){if(e.key==='Escape')x()}function x(){d.remove();document.removeEventListener('keydown',k)}d.onclick=x;document.addEventListener('keydown',k);document.body.appendChild(d)}
-var cv=$('#cv');
-cv.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;if(b.id==='clgo')login();else if(b.id==='clout'){unlocked=null;clientView()}else if(b.dataset.big)openBig(b.dataset.big)});
-cv.addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.target.id==='cid'||e.target.id==='cpw'))login()});
-/* ratings and notes */
-var GA=null;
-function fkey(cid){return 'c_'+String(cid).toLowerCase().replace(/[^a-z0-9_-]/g,'_')}
-function subFb(){if(!DB||!canEdit||subFb.on)return;subFb.on=1;DB.collection('feedback').onSnapshot(function(s){s.docs.forEach(function(d){FB[d.id]=d.data()});if(cur==='admin'&&tab==='clients'&&!dirty&&$('#panel'))panel()},function(){})}
-function fbsum(c){var d=FB[fkey(c.cid)],p=(d&&d.p)||{},ids=(c.photos||[]).filter(function(x){return p[x.id]});if(!ids.length)return '<p class="hint">No feedback from this client yet.</p>';return '<h3 class="fh">Client feedback</h3><div class="fbl">'+ids.map(function(x){var f=p[x.id],r=f.r||0;return '<div class="fbi"><img alt="" src="/_blob/'+esc(x.id)+'"><div><div class="strs">'+'★'.repeat(r)+'<span class="dim">'+'★'.repeat(5-r)+'</span></div>'+(f.f==='pick'?'<b>⚑ Picked</b> ':'')+(f.f==='reject'?'<b>✕ Rejected</b> ':'')+(f.n?'<p>'+esc(f.n)+'</p>':'')+'</div></div>'}).join('')+'</div>'}
+if(unlocked){gallery(unlocked);return}
+if($('#cid')&&(document.activeElement===$('#cid')||document.activeElement===$('#cpw')))return;
+el.innerHTML='<div class="wrap cl"><div class="login"><h1 class="ptitle">Client login</h1><p>Enter the ID and password we sent you to view your photos.</p><label class="f"><span>ID</span><input id="cid" autocomplete="username"></label><label class="f"><span>Password</span><input id="cpw" type="password" autocomplete="current-password"></label><button class="btn y" id="clgo" style="cursor:pointer;font-family:inherit">View my photos</button> <span id="clmsg"></span></div></div>'}
+function login(){var m=$('#clmsg');m.textContent='Checking…';api('POST','/api/client/login',{cid:$('#cid').value,password:$('#cpw').value}).then(function(r){unlocked=r.client;GA=null;clientView()},function(e){m.textContent=e.message})}
 function fb(id){return GA.p[id]||{r:0,f:'',n:''}}
 function setS(m){['#gst','#gst2'].forEach(function(s){var e=$(s);if(e)e.textContent=m})}
-function flush(){if(!GA)return;if(!DB){setS('Not saved: sign-in needed');return}var clean={};Object.keys(GA.p).forEach(function(k){var x=GA.p[k];if(x.r||x.f||x.n)clean[k]=x});DB.doc('feedback/'+GA.key).set({p:clean,cid:GA.c.cid,name:GA.c.name,at:new Date().toISOString()}).then(function(){setS('Saved')},function(){setS('Could not save. Your changes stay on screen.')})}
+function flush(){if(!GA)return;var clean={};Object.keys(GA.p).forEach(function(k){var x=GA.p[k];if(x.r||x.f||x.n)clean[k]=x});api('PUT','/api/client/feedback',{p:clean}).then(function(){setS('Saved')},function(){setS('Could not save. Your changes stay on screen.')})}
 function setFb(pid,patch){GA.p[pid]=Object.assign({r:0,f:'',n:''},GA.p[pid]||{},patch);setS('Saving…');clearTimeout(GA.t);GA.t=setTimeout(flush,700)}
 function stars(r,id){var s='';for(var i=1;i<=5;i++)s+='<button class="st'+(i<=r?' on':'')+'" data-rate="'+i+'" data-pid="'+id+'" aria-label="'+i+' star'+(i>1?'s':'')+'">★</button>';return s}
-function gallery(c){if(!GA||GA.c.cid!==c.cid){if(GA&&GA.t){clearTimeout(GA.t);flush()}GA={c:c,key:fkey(c.cid),p:{},filter:'all',idx:-1,t:null};var g=GA;if(DB)DB.doc('feedback/'+g.key).get().then(function(s){if(s.exists&&s.data().p)g.p=s.data().p;if(GA===g)gview()},function(){})}else GA.c=c;gview();return true}
+function gallery(c){if(!GA||GA.c.cid!==c.cid){GA={c:c,p:{},filter:'all',idx:-1,t:null};var g=GA;api('GET','/api/client/feedback').then(function(r){g.p=r.p||{};if(GA===g)gview()}).catch(function(){})}else GA.c=c;gview()}
 function gview(){var el=$('#cv'),c=GA.c,ps=c.photos||[],f=GA.filter,list=[],picks=0,rated=0,notes=0;
 ps.forEach(function(p,i){var x=fb(p.id);if(x.f==='pick')picks++;if(x.r)rated++;if(x.n)notes++;if(f==='all'||(f==='pick'&&x.f==='pick')||(f==='reject'&&x.f==='reject')||(f==='unrated'&&!x.r)||(f==='3'&&x.r>=3))list.push(i)});
-el.innerHTML='<div class="wrap cl"><div class="abar"><h1 class="ptitle">'+esc(c.name)+'</h1><button class="btn w" id="clout" style="cursor:pointer;font-family:inherit">Log out</button></div>'+(c.note?'<p class="lead2">'+esc(c.note)+'</p>':'')+'<div class="gbar"><span class="gsum">'+picks+' picked · '+rated+' rated · '+notes+' notes <span id="gst" class="hint"></span></span><div class="chips">'+[['all','All'],['pick','Picked'],['3','★3+'],['unrated','Unrated'],['reject','Rejected']].map(function(a){return '<button class="chip'+(f===a[0]?' on':'')+'" data-flt="'+a[0]+'">'+a[1]+'</button>'}).join('')+'</div></div><div class="gg">'+list.map(function(i){var p=ps[i],x=fb(p.id);return '<div class="gc'+(x.f==='reject'?' rej':'')+'"><button class="ph pbtn" data-open="'+i+'" aria-label="Open photo '+(i+1)+'"><img alt="Photo '+(i+1)+'" src="/_blob/'+esc(p.id)+'">'+(x.f==='pick'?'<b class="flag">⚑</b>':'')+'</button><div class="gm"><span class="strs">'+stars(x.r,p.id)+'</span><span>'+(x.n?'✎':'')+'</span></div></div>'}).join('')+'</div>'+(list.length?'':'<p>'+(ps.length?'No photos match this filter.':'Your photos will appear here soon.')+'</p>')+'<p class="hint">Tip: open a photo, then press 1–5 to rate, P to pick, X to reject, 0 to clear, and the arrow keys to move.</p></div>';
+el.innerHTML='<div class="wrap cl"><div class="abar"><h1 class="ptitle">'+esc(c.name)+'</h1><button class="btn w" id="clout" style="cursor:pointer;font-family:inherit">Log out</button></div>'+(c.note?'<p class="lead2">'+esc(c.note)+'</p>':'')+'<div class="gbar"><span class="gsum">'+picks+' picked · '+rated+' rated · '+notes+' notes <span id="gst" class="hint"></span></span><div class="chips">'+[['all','All'],['pick','Picked'],['3','★3+'],['unrated','Unrated'],['reject','Rejected']].map(function(a){return '<button class="chip'+(f===a[0]?' on':'')+'" data-flt="'+a[0]+'">'+a[1]+'</button>'}).join('')+'</div></div><div class="gg">'+list.map(function(i){var p=ps[i],x=fb(p.id);return '<div class="gc'+(x.f==='reject'?' rej':'')+'"><button class="ph pbtn" data-open="'+i+'" aria-label="Open photo '+(i+1)+'"><img alt="Photo '+(i+1)+'" src="/api/photo/'+esc(p.id)+'">'+(x.f==='pick'?'<b class="flag">⚑</b>':'')+'</button><div class="gm"><span class="strs">'+stars(x.r,p.id)+'</span><span>'+(x.n?'✎':'')+'</span></div></div>'}).join('')+'</div>'+(list.length?'':'<p>'+(ps.length?'No photos match this filter.':'Your photos will appear here soon.')+'</p>')+'<p class="hint">Tip: open a photo, then press 1–5 to rate, P to pick, X to reject, 0 to clear, and the arrow keys to move.</p></div>';
 if(GA.idx>=0)viewer()}
 function viewer(){var ps=GA.c.photos||[],i=GA.idx,p=ps[i];if(!p){closeV();return}var x=fb(p.id),d=$('#lbx');if(!d){d=document.createElement('div');d.id='lbx';document.body.appendChild(d)}
 var ta=d.querySelector('textarea'),keep=ta&&document.activeElement===ta?ta.value:null;
-d.innerHTML='<div class="lv"><div class="lvi"><img alt="" src="/_blob/'+esc(p.id)+'"></div><div class="lvp"><div class="lvh"><b>Photo '+(i+1)+' of '+ps.length+'</b><button class="lvx" data-vclose="1" aria-label="Close">✕</button></div><div class="strs big">'+stars(x.r,p.id)+'</div><div class="lvb"><button class="chip'+(x.f==='pick'?' on':'')+'" data-flag="pick" data-pid="'+p.id+'">⚑ Pick</button><button class="chip'+(x.f==='reject'?' on':'')+'" data-flag="reject" data-pid="'+p.id+'">✕ Reject</button></div><label class="f"><span>Note for the photographer</span><textarea rows="5" data-note="'+p.id+'" placeholder="Add a note about this photo">'+esc(x.n||'')+'</textarea></label><div class="lvn"><button class="chip" data-nav="-1">‹ Prev</button><button class="chip" data-nav="1">Next ›</button></div><span id="gst2" class="hint"></span></div></div>';
+d.innerHTML='<div class="lv"><div class="lvi"><img alt="" src="/api/photo/'+esc(p.id)+'"></div><div class="lvp"><div class="lvh"><b>Photo '+(i+1)+' of '+ps.length+'</b><button class="lvx" data-vclose="1" aria-label="Close">✕</button></div><div class="strs big">'+stars(x.r,p.id)+'</div><div class="lvb"><button class="chip'+(x.f==='pick'?' on':'')+'" data-flag="pick" data-pid="'+p.id+'">⚑ Pick</button><button class="chip'+(x.f==='reject'?' on':'')+'" data-flag="reject" data-pid="'+p.id+'">✕ Reject</button></div><label class="f"><span>Note for the photographer</span><textarea rows="5" data-note="'+p.id+'" placeholder="Add a note about this photo">'+esc(x.n||'')+'</textarea></label><div class="lvn"><button class="chip" data-nav="-1">‹ Prev</button><button class="chip" data-nav="1">Next ›</button></div><span id="gst2" class="hint"></span></div></div>';
 if(keep!==null){var t=d.querySelector('textarea');t.value=keep;t.focus()}}
 function closeV(){var d=$('#lbx');if(d)d.remove();if(GA){GA.idx=-1;gview()}}
 function nav(s){var n=(GA.c.photos||[]).length;if(!n)return;GA.idx=(GA.idx+s+n)%n;viewer()}
-cv.addEventListener('click',function(e){var b=e.target.closest('button');if(!b||!GA)return;var d=b.dataset;
-if(d.rate){var x=fb(d.pid);setFb(d.pid,{r:x.r===+d.rate?0:+d.rate});gview()}
+var cv=$('#cv');
+cv.addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.target.id==='cid'||e.target.id==='cpw'))login()});
+cv.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var d=b.dataset;
+if(b.id==='clgo')login();
+else if(b.id==='clout'){if(GA&&GA.t){clearTimeout(GA.t);flush()}api('POST','/api/client/logout').catch(function(){}).then(function(){unlocked=null;GA=null;clientView()})}
+else if(!GA)return;
+else if(d.rate){var x=fb(d.pid);setFb(d.pid,{r:x.r===+d.rate?0:+d.rate});gview()}
 else if(d.flt){GA.filter=d.flt;gview()}
 else if(d.open){GA.idx=+d.open;viewer()}});
-document.addEventListener('click',function(e){var v=e.target.closest('#lbx');if(!v||!GA)return;var b=e.target.closest('button');if(!b){return}var d=b.dataset;
+document.addEventListener('click',function(e){var v=e.target.closest('#lbx');if(!v||!GA)return;var b=e.target.closest('button');if(!b)return;var d=b.dataset;
 if(d.rate){var x=fb(d.pid);setFb(d.pid,{r:x.r===+d.rate?0:+d.rate});viewer()}
 else if(d.flag){var y=fb(d.pid);setFb(d.pid,{f:y.f===d.flag?'':d.flag});viewer()}
 else if(d.nav)nav(+d.nav);
@@ -328,6 +329,7 @@ else if(d.vclose)closeV()});
 document.addEventListener('input',function(e){var t=e.target;if(t.dataset&&t.dataset.note&&GA)setFb(t.dataset.note,{n:t.value})});
 document.addEventListener('keydown',function(e){if(!GA||GA.idx<0)return;var k=e.key;if(k==='Escape'){closeV();return}if(e.target.tagName==='TEXTAREA')return;var p=(GA.c.photos||[])[GA.idx];if(!p)return;
 if(/^[0-5]$/.test(k)){setFb(p.id,{r:+k});viewer()}else if(k==='p'||k==='P'){var y=fb(p.id);setFb(p.id,{f:y.f==='pick'?'':'pick'});viewer()}else if(k==='x'||k==='X'){var z=fb(p.id);setFb(p.id,{f:z.f==='reject'?'':'reject'});viewer()}else if(k==='ArrowRight')nav(1);else if(k==='ArrowLeft')nav(-1)});
+
 /* routing */
 var vs={home:1,portfolio:1,journal:1,admin:1,client:1};
 function show(n){cur=n;$$('.view').forEach(function(v){v.classList.toggle('on',v.id==='v-'+n)});$$('nav a[data-v]').forEach(function(a){a.classList.toggle('on',a.dataset.v===n)});document.body.classList.toggle('noban',n==='client');if(n==='admin')buildAdmin();if(n==='client')clientView()}
@@ -338,10 +340,10 @@ else{var el=document.getElementById(h);if(el){var v=el.closest('.view');if(v&&v.
 addEventListener('hashchange',route);
 render();route();
 
-/* capabilities (light up when available) */
-if(window.claude&&claude.use){
-claude.use('db').then(function(db){if(!db)return;DB=db;subFb();db.doc('site/clients').onSnapshot(function(s){CL=s.exists&&s.data().list?s.data():{list:[]};if(cur==='client'&&!unlocked)clientView();if(cur==='client'&&unlocked)clientView();if(cur==='admin'&&!dirty){D=null;buildAdmin()}},function(){});db.doc('site/content').onSnapshot(function(s){if(s.exists&&!dirty){C=Object.assign(clone(DEF),s.data());D=null;render()}if(cur==='admin'&&!dirty)buildAdmin()},function(){})}).catch(function(){});
-claude.use('assets').then(function(a){AS=a;if(cur==='admin'&&!dirty)buildAdmin()}).catch(function(){});
-claude.use('user').then(function(u){if(!u)return;u.canEdit().then(function(v){canEdit=v;$('#adminlink').hidden=!v;subFb();if(cur==='admin'&&!dirty)buildAdmin()})}).catch(function(){})}
+/* load saved content and sessions */
+api('GET','/api/content').then(function(c){if(c&&c.hero){C=Object.assign(clone(DEF),c);render()}}).catch(function(){});
+api('GET','/api/admin/me').then(function(){authed=true;$('#adminlink').hidden=false;if(cur==='admin'){D=null;buildAdmin()}}).catch(function(){});
+api('GET','/api/client/me').then(function(r){unlocked=r.client;if(cur==='client')clientView()}).catch(function(){});
 })();
-</script></body></html>
+</script>
+</body></html>
