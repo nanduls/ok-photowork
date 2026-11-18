@@ -53,6 +53,21 @@ const clients = async (env) => JSON.parse((await env.SITE.get('clients')) || '[]
 const pub = (c) => ({ cid: c.cid, name: c.name, note: c.note || '', photos: c.photos || [] });
 const body = async (req) => { try { return await req.json(); } catch { return null; } };
 
+/* ---- bookings ----
+   One KV key per booking: "bk:" + (9999999999999 - timestamp, 13 digits) + 8 random hex chars.
+   The inverted timestamp makes KV's ascending key order newest-first. */
+const BK_ID = /^\d{13}[a-f0-9]{8}$/;
+const BK_STATUS = { new: 1, confirmed: 1, done: 1, cancelled: 1 };
+const BK_LIMIT = 5; // requests per IP per hour
+const clip = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim().slice(0, n);
+function okDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + 'T00:00:00Z');
+  if (isNaN(d) || d.toISOString().slice(0, 10) !== s) return false;
+  const now = Date.now();
+  return d.getTime() >= now - 2 * 86400000 && d.getTime() <= now + 3 * 365 * 86400000;
+}
+
 async function handle(request, env) {
   try {
     if (!env.SITE || !env.PHOTOS || !env.ADMIN_PASSWORD || !env.SESSION_SECRET) {
@@ -72,6 +87,36 @@ async function handle(request, env) {
       const o = await env.PHOTOS.get('p/' + id);
       if (!o) return J({ error: 'Not found' }, 404);
       return new Response(o.body, { headers: { 'Content-Type': o.httpMetadata?.contentType || 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' } });
+    }
+
+    /* ---- public booking request ---- */
+    if (p === 'booking' && m === 'POST') {
+      const rk = 'rl:bk:' + (request.headers.get('CF-Connecting-IP') || 'x');
+      if (+((await env.SITE.get(rk)) || 0) >= BK_LIMIT) {
+        return J({ error: 'Too many requests from this connection. Please try again in an hour, or message us directly.' }, 429);
+      }
+      const raw = await request.text();
+      if (raw.length > 20000) return J({ error: 'Request is too large.' }, 413);
+      let b;
+      try { b = JSON.parse(raw); } catch { b = null; }
+      if (!b || typeof b !== 'object') return J({ error: 'Invalid data.' }, 400);
+      if (clip(b.website, 200)) return J({ ok: true, ref: 'OK-000000' }); // honeypot: pretend success, store nothing
+      const r = {
+        name: clip(b.name, 100), email: clip(b.email, 120), phone: clip(b.phone, 30),
+        service: clip(b.service, 60), date: clip(b.date, 10), time: clip(b.time, 40),
+        location: clip(b.location, 200), photographer: clip(b.photographer, 100), message: clip(b.message, 2000),
+      };
+      if (r.name.length < 2) return J({ error: 'Please enter your name.' }, 400);
+      if (!r.email && !r.phone) return J({ error: 'Please add a WhatsApp number or an email so we can reach you.' }, 400);
+      if (r.email && !/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/.test(r.email)) return J({ error: 'That email address does not look right.' }, 400);
+      if (r.phone && !/^[+\d][\d\s().-]{5,}$/.test(r.phone)) return J({ error: 'That phone number does not look right.' }, 400);
+      if (r.phone && r.phone.replace(/\D/g, '').length > 16) return J({ error: 'That phone number does not look right.' }, 400);
+      if (!r.service) return J({ error: 'Please choose the type of shoot.' }, 400);
+      if (!okDate(r.date)) return J({ error: 'Please pick a valid date that is not in the past.' }, 400);
+      const id = String(9999999999999 - Date.now()).padStart(13, '0') + rid().slice(0, 8);
+      await env.SITE.put('bk:' + id, JSON.stringify({ ...r, status: 'new', note: '', at: new Date().toISOString() }));
+      await env.SITE.put(rk, String(+((await env.SITE.get(rk)) || 0) + 1), { expirationTtl: 3600 });
+      return J({ ok: true, ref: 'OK-' + id.slice(-6).toUpperCase() });
     }
 
     /* ---- private client photos (owner client or admin) ---- */
@@ -149,6 +194,36 @@ async function handle(request, env) {
         const l = await env.SITE.list({ prefix: 'fb:', limit: 200 });
         for (const k of l.keys) out[k.name.slice(3)] = JSON.parse((await env.SITE.get(k.name)) || '{}');
         return J(out);
+      }
+      if (p === 'admin/bookings' && m === 'GET') {
+        // 1 list call + up to 40 reads per page, which stays under the Workers Free subrequest limit.
+        const l = await env.SITE.list({ prefix: 'bk:', limit: 40, cursor: url.searchParams.get('cursor') || undefined });
+        const vals = await Promise.all(l.keys.map((k) => env.SITE.get(k.name)));
+        const list = [];
+        vals.forEach((v, i) => {
+          if (!v) return;
+          try { list.push({ id: l.keys[i].name.slice(3), ...JSON.parse(v) }); } catch { /* skip unreadable record */ }
+        });
+        return J({ list, cursor: l.list_complete ? null : l.cursor });
+      }
+      const bm = p.match(/^admin\/bookings\/([^/]+)$/);
+      if (bm && BK_ID.test(bm[1])) {
+        const key = 'bk:' + bm[1];
+        if (m === 'DELETE') { await env.SITE.delete(key); return J({ ok: true }); }
+        if (m === 'PUT') {
+          const cur = await env.SITE.get(key);
+          if (!cur) return J({ error: 'Booking not found.' }, 404);
+          const b = await body(request);
+          if (!b || typeof b !== 'object') return J({ error: 'Invalid data.' }, 400);
+          const rec = JSON.parse(cur);
+          if (b.status !== undefined) {
+            if (!BK_STATUS[b.status]) return J({ error: 'Invalid status.' }, 400);
+            rec.status = b.status;
+          }
+          if (b.note !== undefined) rec.note = clip(b.note, 2000);
+          await env.SITE.put(key, JSON.stringify(rec));
+          return J({ ok: true });
+        }
       }
       return J({ error: 'Not found' }, 404);
     }
