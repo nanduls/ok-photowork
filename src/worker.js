@@ -2,6 +2,7 @@
 // Everything else is served from ./public as static assets.
 // Bindings needed: SITE (KV namespace), PHOTOS (R2 bucket).
 // Secrets needed: ADMIN_PASSWORD, SESSION_SECRET.
+// Optional secret: GOOGLE_SERVICE_ACCOUNT (JSON key of a Google service account) to serve client photos from Google Drive folders.
 
 const enc = new TextEncoder();
 const TYPES = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'image/gif': 1, 'image/avif': 1 };
@@ -52,6 +53,121 @@ const failed = async (env, req, sc) => {
 const clients = async (env) => JSON.parse((await env.SITE.get('clients')) || '[]');
 const pub = (c) => ({ cid: c.cid, name: c.name, note: c.note || '', photos: c.photos || [] });
 const body = async (req) => { try { return await req.json(); } catch { return null; } };
+
+/* ---- Google Drive (client photo folders) ----
+   Each client can have a Drive folder. The folder is shared (Viewer) with a Google service account, and this
+   Worker reads it with that account's key (secret GOOGLE_SERVICE_ACCOUNT). The folder itself stays private:
+   photos are streamed through /api/photo/<fileId> after checking they sit in the signed-in client's folder. */
+const G = 'https://www.googleapis.com/drive/v3';
+const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
+const DRIVE_IMG = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'image/gif': 1 };
+const DRIVE_MAX = 500;
+let GTOK = { t: '', exp: 0 };
+const dcache = new Map(); // short-lived, per-isolate
+const dget = (k) => { const e = dcache.get(k); return e && e.exp > Date.now() ? e.v : undefined; };
+const dset = (k, v, ms) => { if (dcache.size > 500) dcache.clear(); dcache.set(k, { v, exp: Date.now() + ms }); };
+const b64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function saKey(env) {
+  let o = null;
+  try { o = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT || ''); } catch { /* not JSON */ }
+  if (!o || !o.client_email || !o.private_key) return null;
+  return { email: String(o.client_email), key: String(o.private_key).replace(/\\n/g, '\n') };
+}
+function driveFolderId(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  if (DRIVE_ID.test(s)) return s;
+  const m = s.match(/\/folders\/([A-Za-z0-9_-]{10,80})/) || s.match(/[?&]id=([A-Za-z0-9_-]{10,80})/);
+  return m ? m[1] : null;
+}
+async function driveToken(env) {
+  const sa = saKey(env);
+  if (!sa) throw new Error('Google Drive is not connected yet. Add the GOOGLE_SERVICE_ACCOUNT secret (see the README).');
+  if (GTOK.t && GTOK.exp > Date.now() + 60000) return GTOK.t;
+  const now = Math.floor(Date.now() / 1000);
+  const head = b64u(enc.encode(JSON.stringify({ alg: 'RS256', typ: 'JWT' })));
+  const claim = b64u(enc.encode(JSON.stringify({ iss: sa.email, scope: 'https://www.googleapis.com/auth/drive.readonly', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 })));
+  let sig;
+  try {
+    const der = Uint8Array.from(atob(sa.key.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')), (c) => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(head + '.' + claim));
+  } catch { throw new Error('The key in the GOOGLE_SERVICE_ACCOUNT secret could not be read. Paste the whole JSON file.'); }
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') + '&assertion=' + head + '.' + claim + '.' + b64u(sig),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error('Google sign-in failed (' + (j.error_description || j.error || r.status) + '). Check the GOOGLE_SERVICE_ACCOUNT secret.');
+  GTOK = { t: j.access_token, exp: Date.now() + (j.expires_in || 3600) * 1000 };
+  return GTOK.t;
+}
+const gfetch = async (env, url) => fetch(url, { headers: { Authorization: 'Bearer ' + (await driveToken(env)) } });
+async function gerr(env, r) {
+  const j = await r.json().catch(() => ({})), sa = saKey(env), who = sa ? sa.email : 'the service account';
+  if (r.status === 404) return new Error('Folder not found. Check the link, and share the folder with ' + who + ' (Viewer).');
+  if (r.status === 401 || r.status === 403) return new Error('Google Drive refused access' + (j.error && j.error.message ? ' (' + j.error.message + ')' : '') + '. Check that the Google Drive API is enabled and the folder is shared with ' + who + '.');
+  return new Error('Google Drive error ' + r.status + '.');
+}
+async function driveList(env, folder) {
+  const out = [];
+  const q = "'" + folder + "' in parents and trashed = false and (mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/webp' or mimeType = 'image/gif')";
+  let page = '';
+  for (let i = 0; i < 3; i++) {
+    const u = new URLSearchParams({ q, fields: 'nextPageToken,files(id,name)', orderBy: 'name_natural', pageSize: '200', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true' });
+    if (page) u.set('pageToken', page);
+    const r = await gfetch(env, G + '/files?' + u);
+    if (!r.ok) throw await gerr(env, r);
+    const j = await r.json();
+    for (const f of j.files || []) if (DRIVE_ID.test(f.id)) out.push({ id: f.id, n: String(f.name || '').slice(0, 120) });
+    page = j.nextPageToken || '';
+    if (!page || out.length >= DRIVE_MAX) break;
+  }
+  return out.slice(0, DRIVE_MAX);
+}
+async function drivePhotos(env, c) {
+  const k = 'l:' + c.drive, hit = dget(k);
+  if (hit) return hit;
+  const l = await driveList(env, c.drive);
+  dset(k, l, 120000);
+  return l;
+}
+async function driveMeta(env, id) {
+  const k = 'm:' + id, hit = dget(k);
+  if (hit !== undefined) return hit;
+  const r = await gfetch(env, G + '/files/' + id + '?supportsAllDrives=true&fields=' + encodeURIComponent('id,mimeType,parents,thumbnailLink,trashed'));
+  if (!r.ok && r.status !== 404 && r.status !== 403) throw await gerr(env, r);
+  const v = r.ok ? await r.json() : null;
+  dset(k, v, 300000);
+  return v;
+}
+async function drivePhoto(env, id, folders, size) {
+  const meta = await driveMeta(env, id);
+  if (!meta || meta.trashed || !DRIVE_IMG[meta.mimeType] || !(meta.parents || []).some((f) => folders.includes(f))) return J({ error: 'Not allowed' }, 403);
+  let r = null, type = meta.mimeType;
+  if (size && meta.thumbnailLink) {
+    try { // smaller preview for the gallery grid; only ever send the token to Google's image host
+      const t = new URL(meta.thumbnailLink);
+      if (t.protocol === 'https:' && /\.googleusercontent\.com$/.test(t.hostname)) {
+        const tr = await fetch(meta.thumbnailLink.replace(/=s\d+[^=]*$/, '') + '=s' + Math.max(100, Math.min(1600, size)), { headers: { Authorization: 'Bearer ' + (await driveToken(env)) } });
+        if (tr.ok) { r = tr; type = tr.headers.get('Content-Type') || 'image/jpeg'; if (!/^image\//.test(type)) type = 'image/jpeg'; }
+      }
+    } catch { /* fall back to the original file */ }
+  }
+  if (!r) {
+    r = await gfetch(env, G + '/files/' + id + '?alt=media&supportsAllDrives=true');
+    if (!r.ok) return J({ error: 'Could not load this photo.' }, 502);
+  }
+  return new Response(r.body, { headers: { 'Content-Type': type, 'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff' } });
+}
+// What a signed-in client sees: uploaded photos plus the photos in their Drive folder.
+async function cview(env, c) {
+  const o = pub(c);
+  if (c.drive) {
+    try { o.photos = [...o.photos, ...(await drivePhotos(env, c))]; } catch { o.driveError = 'Photos from Google Drive could not be loaded right now. Please try again later.'; }
+  }
+  return o;
+}
 
 /* ---- bookings ----
    One KV key per booking: "bk:" + (9999999999999 - timestamp, 13 digits) + 8 random hex chars.
@@ -122,7 +238,15 @@ async function handle(request, env) {
     /* ---- private client photos (owner client or admin) ---- */
     if (p.startsWith('photo/') && m === 'GET') {
       const id = p.slice(6);
-      if (!ID.test(id)) return J({ error: 'Not found' }, 404);
+      const drv = !ID.test(id) && DRIVE_ID.test(id);
+      if (!ID.test(id) && !drv) return J({ error: 'Not found' }, 404);
+      if (drv) { // a file from a client's Google Drive folder
+        const all = await clients(env);
+        const me = !admin && cid && all.find((x) => x.cid === cid);
+        const folders = admin ? all.map((x) => x.drive).filter(Boolean) : me && me.drive ? [me.drive] : [];
+        if (!folders.length) return J({ error: 'Not allowed' }, 403);
+        try { return await drivePhoto(env, id, folders, parseInt(url.searchParams.get('s'), 10) || 0); } catch { return J({ error: 'Could not load this photo.' }, 502); }
+      }
       if (!admin) {
         const c = cid && (await clients(env)).find((x) => x.cid === cid);
         if (!c || !(c.photos || []).some((x) => x.id === id)) return J({ error: 'Not allowed' }, 403);
@@ -152,7 +276,7 @@ async function handle(request, env) {
         return J({ ok: true });
       }
       if (p === 'admin/clients' && m === 'GET') {
-        return J({ list: (await clients(env)).map((c) => ({ ...pub(c), hasPw: !!c.hash })) });
+        return J({ list: (await clients(env)).map((c) => ({ ...pub(c), hasPw: !!c.hash, drive: c.drive || '' })), driveEmail: (saKey(env) || {}).email || '' });
       }
       if (p === 'admin/clients' && m === 'PUT') {
         const b = await body(request);
@@ -163,6 +287,8 @@ async function handle(request, env) {
           if (!/^[a-z0-9_-]{2,40}$/.test(id)) return J({ error: 'Client IDs need 2 to 40 letters, numbers, - or _ (no spaces).' }, 400);
           if (seen.has(id)) return J({ error: 'Duplicate client ID: ' + id }, 400);
           seen.add(id);
+          const drive = driveFolderId(c.drive);
+          if (drive === null) return J({ error: 'Could not find a Google Drive folder ID in "' + String(c.drive).slice(0, 60) + '". Paste the folder link from Drive (Share, then Copy link).' }, 400);
           const o = old.find((x) => x.cid === id) || {};
           let salt = o.salt, hash = o.hash;
           if (c.pw) {
@@ -173,11 +299,19 @@ async function handle(request, env) {
           out.push({
             cid: id, name: String(c.name || '').slice(0, 100), note: String(c.note || '').slice(0, 2000),
             photos: (c.photos || []).map((x) => x.id).filter((i) => ID.test(i)).slice(0, 500).map((i) => ({ id: i })),
-            salt, hash,
+            drive, salt, hash,
           });
         }
         await env.SITE.put('clients', JSON.stringify(out));
         return J({ ok: true });
+      }
+      if (p === 'admin/drive' && m === 'GET') {
+        const f = driveFolderId(url.searchParams.get('folder'));
+        if (!f) return J({ error: f === null ? 'That does not look like a Google Drive folder link.' : 'Paste a Drive folder link first.' }, 400);
+        try {
+          const l = await driveList(env, f);
+          return J({ ok: true, count: l.length, names: l.slice(0, 5).map((x) => x.n) });
+        } catch (e) { return J({ error: e.message }, 400); }
       }
       if (p === 'admin/upload' && m === 'POST') {
         const type = (request.headers.get('Content-Type') || '').split(';')[0];
@@ -237,13 +371,13 @@ async function handle(request, env) {
       const salt = (c && c.salt) || 'none';
       const h = await pbk(String((b && b.password) || ''), salt);
       if (!c || !c.hash || !same(h, c.hash)) { await failed(env, request, 'c'); return J({ error: 'ID or password is not correct.' }, 401); }
-      return J({ client: pub(c) }, 200, { 'Set-Cookie': setCookie('cs', await token(env, 'client', c.cid, 86400), 86400) });
+      return J({ client: await cview(env, c) }, 200, { 'Set-Cookie': setCookie('cs', await token(env, 'client', c.cid, 86400), 86400) });
     }
     if (p === 'client/logout' && m === 'POST') return J({ ok: true }, 200, { 'Set-Cookie': setCookie('cs', '', 0) });
     if (p.startsWith('client/')) {
       const c = cid && (await clients(env)).find((x) => x.cid === cid);
       if (!c) return J({ error: 'Please sign in.' }, 401);
-      if (p === 'client/me') return J({ client: pub(c) });
+      if (p === 'client/me') return J({ client: await cview(env, c) });
       if (p === 'client/feedback' && m === 'GET') {
         return J(JSON.parse((await env.SITE.get('fb:' + c.cid)) || '{"p":{}}'));
       }
@@ -251,6 +385,7 @@ async function handle(request, env) {
         const b = await body(request);
         if (!b || typeof b.p !== 'object' || b.p === null) return J({ error: 'Invalid data.' }, 400);
         const ok = new Set((c.photos || []).map((x) => x.id)), out = {};
+        if (c.drive) { try { (await drivePhotos(env, c)).forEach((x) => ok.add(x.id)); } catch { /* Drive unavailable: only uploaded photos can be rated */ } }
         for (const [k, v] of Object.entries(b.p)) {
           if (!ok.has(k) || !v) continue;
           const r = Math.max(0, Math.min(5, parseInt(v.r, 10) || 0));
